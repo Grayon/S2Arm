@@ -1400,7 +1400,7 @@
   "update.hint.sendAgain": "電腦上這款已更新好；iPhone / iPad 上的要用上新版，點「匯出…」勾上那台再裝一次。",
   "exportsheet.row.cancelled": "已取消",
   "install.layout.hint.explicit": "你的描述檔是顯式 App ID：只允許一個套件名稱，每款獨立 App 都會裝成它，裝一款會頂掉前一款。想同時裝幾款，用萬用字元（*）描述檔，或改用通用 S2Arm（一個 App 裝所有遊戲）。",
-  "export.done.standaloneSaveCarry": "之前用獨立 App 裝過的遊戲，存檔在舊 App 裡。把手機連上啟動器，對這款點「匯出…」、勾上這台手機後開始，啟動器會自動把舊 App 裡這款的存檔複製進新 App（舊 App 裡的不動）。進遊戲確認進度沒問題。暫時別刪舊 App：只匯出到資料夾、自己側載的裝法，存檔還搬不過去，後續版本補。"
+  "export.done.standaloneSaveCarry": "之前用獨立 App 裝過的遊戲，存檔在舊 App 裡：暫時別刪舊 App，遷移辦法隨後續版本提供。"
  },
  "text": {
   "直连": "直連",

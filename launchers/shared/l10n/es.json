@@ -1404,7 +1404,7 @@
   "update.hint.sendAgain": "Este juego ya está actualizado en este ordenador. Para tener la nueva versión en tu iPhone / iPad, haz clic en «Exportar…» y marca ese dispositivo para instalarlo de nuevo.",
   "exportsheet.row.cancelled": "Cancelado",
   "install.layout.hint.explicit": "Tu perfil usa un App ID explícito y solo permite un identificador: cada app independiente se instala con él y reemplaza a la anterior. Para tener varios juegos a la vez, usa un perfil comodín (*) o cambia a S2Arm (una app para todos los juegos).",
-  "export.done.standaloneSaveCarry": "Los juegos que instalaste antes como apps independientes guardan sus partidas en la app antigua. Conecta el teléfono al lanzador, pulsa «Exportar…» en este juego, marca este teléfono y empieza: el lanzador copia la partida de este juego de la app antigua a la nueva (la antigua no se toca). Comprueba tu progreso en el juego. No borres todavía la app antigua: si solo exportas a una carpeta y lo instalas tú mismo, las partidas aún no se pueden trasladar; una versión posterior lo añadirá."
+  "export.done.standaloneSaveCarry": "Los juegos que instalaste antes como apps independientes guardan sus partidas en la app antigua: no la borres todavía. La forma de trasladar las partidas llegará en una versión posterior."
  },
  "text": {
   "无法为带空格的构建路径创建无空格别名。": "No se pudo crear un alias sin espacios para la ruta de compilación que contiene espacios.",
