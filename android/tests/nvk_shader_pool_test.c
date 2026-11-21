@@ -1526,6 +1526,88 @@ static int gs_libpack_test(void) {
     printf("nvk shader pool (libpack GS): %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
+
+// ---- #1890：计算「库拒收 → 回退现编」与「首用现编」必须是同一份请求 ----
+// 真机 8E 局（sora2）：release 出库以「cs bindings[1] cp_t_tcb_48 kind 'tex' has no consumable guest source」拒收
+//   （main 的 lp_tex_slot_word 没有 reg 32..39 映射）→ 回退现编渲染出灰；debug 首用现编正常。
+//   编译请求由 nvk_compute_request_prepare 在取库之前一次成型：code / control / c1、纹理与图像事实表
+//   （c2 字 72..86 的图像槽事实以 handle 72..86 落进 textures[]）都在请求体里——回退路不得复用库件 v1，
+//   与首用现编必须逐字节同。本用例在同一 rp_S 状态各跑一次：
+//   A = 无库根（首用现编）；B = 库根里放 e3247c3b 形拒收件（_b.json 带 reg32 tex 绑定、无出处）→ 真拒收 → 现编。
+//   另钉三条：B 的拒收必须真发生（库拒收计数 +1）；请求里必须有字 72 的图像事实；
+//   灵敏度对照——解掉图像槽 0 后请求必须变（比较非空转、字 72..86 的事实确实进请求）。
+static int cs_fallback_equiv_test(void) {
+    extern uint64_t s2a_libpack_rejects(void);
+    rp_shader_reset(); s2a_source_clear(); rp_state_reset(); nvn_unimpl_reset();
+    source();
+    fake_cs_success = 1; separate_fixture = 1; fake_reg_changes = 1;
+    bind_pools(100);
+    rp_S.ubo[5][0].addr = 0x1000; rp_S.ubo[5][0].size = 64;
+    rp_S.ssbo[5][0].addr = 0x10000; rp_S.ssbo[5][0].size = 256;
+    rp_S.img[5][0] = 78;   // 图像槽 0（c2 字 72）——真件注释「texture handle 48 is image slot 0」，按 BindImage 绑
+    // 库容器：键 = rp_S.skey[5] 八字节；_b.json 按真件 e3247c3b 的绑定形（reg32 的 tex 在本 main 没有槽映射 → 真拒收）
+    char root[256], dir[600];
+    snprintf(root, sizeof root, "%s/nvk_cs_fallback.XXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    if (!mkdtemp(root)) { CHECK(0, "fallback-equiv temp root"); return 1; }
+    snprintf(dir, sizeof dir, "%s/shaders", root); mkdir(dir, 0700);
+    snprintf(dir, sizeof dir, "%s/shaders/direct", root); mkdir(dir, 0700);
+    snprintf(dir, sizeof dir, "%s/shaders/direct/b-%s-vk", root, DMSH_CHAIN); mkdir(dir, 0700);
+    char khex[17]; for (int b = 0; b < 8; b++) snprintf(khex + 2 * b, 3, "%02x", rp_S.skey[5][b]);
+    char bjson[1024];
+    int jn = snprintf(bjson, sizeof bjson,
+        "{\"key\":\"%s_b\",\"route\":\"B\",\"chain\":\"%s\",\"dm_ctl\":\"%s\",\"stage\":\"cs\",\"entry\":\"main0\","
+        "\"msl_entry_kind\":\"kernel\",\"threadgroup_size\":[8,8,8],"
+        "\"bindings\":[{\"msl_name\":\"cp_c1\",\"msl_type\":\"constant _18*\",\"arg_id\":0,\"kind\":\"c1\",\"bank\":1},"
+        "{\"msl_name\":\"cp_t_tcb_48\",\"msl_type\":\"texture3d<float>\",\"arg_id\":1,\"kind\":\"tex\",\"reg\":32},"
+        "{\"msl_name\":\"cp_t_tcb_48Smplr\",\"msl_type\":\"sampler\",\"arg_id\":2,\"kind\":\"samp_tex\",\"reg\":32},"
+        "{\"msl_name\":\"cp_i_cb2_48_\",\"msl_type\":\"texture3d<float, access::write>\",\"arg_id\":3,\"kind\":\"img\",\"reg\":0}]}",
+        khex, DMSH_CHAIN, khex);
+    CHECK(jn > 0 && (size_t)jn < sizeof bjson, "fallback-equiv _b.json fits");
+    static const uint32_t spv0[5] = {0x07230203u, 0x00010300u, 0, 1, 0};
+    uint64_t key = lp_key(rp_S.skey[5]);
+    uint64_t keys[2] = {key, key}; uint8_t kinds[2] = {1, 52};
+    const uint8_t *data[2] = {(const uint8_t *)bjson, (const uint8_t *)spv0}; size_t lens[2] = {(size_t)jn, sizeof spv0};
+    CHECK(lp_write(dir, keys, kinds, data, lens, 2) == 0, "fallback-equiv container written");
+    // A：无库根——首用现编
+    unsetenv("S2A_SHADER_REVISION_ROOT"); unsetenv("S2A_DIRECT_CACHE_DIR");
+    const struct rp_prog *a = NULL; compiler_calls = cs_loads = 0; captured[0] = last_red[0] = 0;
+    CHECK(rp_shader_resolve_compute(&a) == 0 && a && a->is_compute && compiler_calls == 1 && cs_loads == 1,
+          "CS first-use compiles and loads (calls=%d loads=%d red=%s)", compiler_calls, cs_loads, last_red);
+    static char req_a[sizeof captured]; memcpy(req_a, captured, sizeof captured); const size_t na = strlen(req_a);
+    CHECK(strstr(req_a, "{\"stage\":\"cs\",\"handle\":72,\"cbufSlot\":-1,\"samplerType\":\"2d\",\"format\":\"R8G8B8A8Unorm\"") != NULL,
+          "first-use request carries the c2 word-72 image fact (img slot 0): %.200s", strstr(req_a, "\"textures\""));
+    // B：同一状态 + 库根里有 e3247c3b 形拒收件——真拒收后现编
+    setenv("S2A_SHADER_REVISION_ROOT", root, 1);
+    rp_shader_reset();   // 清程序表 / 结果合并 / 快路表：回退路重新走慢解析；源登记与 rp_S 不动（同一状态）
+    const uint64_t rej0 = s2a_libpack_rejects();
+    const struct rp_prog *b = NULL; compiler_calls = cs_loads = 0; captured[0] = last_red[0] = 0;
+    CHECK(rp_shader_resolve_compute(&b) == 0 && b && b->is_compute,
+          "CS resolves after library reject (red=%s)", last_red);
+    CHECK(s2a_libpack_rejects() == rej0 + 1, "the fixture entry is rejected for real (rejects %llu -> %llu)",
+          (unsigned long long)rej0, (unsigned long long)s2a_libpack_rejects());
+    CHECK(compiler_calls == 1, "fallback runs the live compiler once (calls=%d)", compiler_calls);
+    const size_t nb = strlen(captured);
+    {   size_t diff = 0; while (diff < na && diff < nb && req_a[diff] == captured[diff]) diff++;
+        CHECK(na == nb && diff == na,
+              "fallback compile request is byte-identical to first-use (len %zu vs %zu, first diff at %zu: %.*s)",
+              na, nb, diff, 60, diff < na ? req_a + diff : ""); }
+    // 灵敏度对照：解掉图像槽 0，请求必须变（否则上面的逐字节比较是空转、字 72..86 的事实根本没进请求）
+    rp_shader_reset(); compiler_calls = cs_loads = 0; captured[0] = last_red[0] = 0;
+    rp_S.img[5][0] = 0;
+    const struct rp_prog *c = NULL;
+    CHECK(rp_shader_resolve_compute(&c) == 0 && c && compiler_calls == 1,
+          "CS without the image binding resolves (calls=%d)", compiler_calls);
+    CHECK(strcmp(captured, req_a) != 0, "unbinding image slot 0 changes the request (comparison not vacuous)");
+    fake_cs_success = 0; separate_fixture = 0; fake_reg_changes = 1;
+    memset(rp_S.ubo[5], 0, sizeof rp_S.ubo[5]); memset(rp_S.ssbo[5], 0, sizeof rp_S.ssbo[5]); memset(rp_S.img[5], 0, sizeof rp_S.img[5]);
+    unsetenv("S2A_SHADER_REVISION_ROOT");
+    char path[700];
+    snprintf(path, sizeof path, "%s/lib.idx", dir); unlink(path); snprintf(path, sizeof path, "%s/lib.000.pak", dir); unlink(path);
+    rmdir(dir); snprintf(dir, sizeof dir, "%s/shaders/direct", root); rmdir(dir); snprintf(dir, sizeof dir, "%s/shaders", root); rmdir(dir); rmdir(root);
+    rp_shader_reset();
+    printf("nvk shader pool (CS fallback equiv): %d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+}
 static int diag_compile_test(void) {
     trace_on = 1; trace_begin_count = trace_end_count = 0; fake_gs_success = 0;
     gs_request_test();
@@ -1638,6 +1720,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--live-compile-stop")) return live_compile_pending_test(1);
     if (argc == 2 && !strcmp(argv[1], "--diag-compile")) return diag_compile_test();
     if (argc == 2 && !strcmp(argv[1], "--gs-libpack")) return gs_libpack_test();
+    if (argc == 2 && !strcmp(argv[1], "--cs-fallback-equiv")) return cs_fallback_equiv_test();
     if (argc == 2 && !strcmp(argv[1], "--compute-warm")) return compute_warm_test();
     if (argc == 2 && !strcmp(argv[1], "--compute-warm-off")) return compute_warm_off_test();
     if (argc == 2 && !strcmp(argv[1], "--legacy-bytes")) {

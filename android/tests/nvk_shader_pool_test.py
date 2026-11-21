@@ -60,11 +60,36 @@ def main():
         host_link.run(base + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
         return subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=30, env=env)
 
-    if len(sys.argv) == 2 and sys.argv[1] in ('--live-compile-thread', '--live-compile-pending', '--live-compile-stop'):
+    if len(sys.argv) == 2 and sys.argv[1] in ('--live-compile-thread', '--live-compile-pending', '--live-compile-stop', '--cs-fallback-equiv'):
         result = run(sys.argv[1][2:], original, args=(sys.argv[1],))
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         return result.returncode
+
+    if sys.argv[1:] == ['--cs-fallback-equiv-mutants']:
+        # 负对照（#1890）：回退现编与首用现编必须同一份请求，且 c2 字 72..86 的图像表事实必须进请求。
+        #   img-facts-dropped：图像表事实收集被掏空 → 「请求带字 72 事实」断言必红；
+        #   fallback-request-diverges：回退路在现编前改动了请求（v1 复用类 bug 的最小替身）→ 逐字节断言必红。
+        text = original.read_text()
+        mutants = [
+            ('img-facts-dropped',
+             '        uint64_t h = rp_S.img[5][slot];\n        tex_t t;',
+             '        uint64_t h = 0; (void)rp_S.img[5][slot];\n        tex_t t;',
+             'first-use request carries the c2 word-72 image fact'),
+            ('fallback-request-diverges',
+             '        if (!bytes && !lpe) {\n            struct s2a_compile_outcome oc;',
+             '        if (!bytes && !lpe) {\n            if (getenv("S2A_SHADER_REVISION_ROOT")) ((char *)rq.json)[16] ^= 0x40;\n            struct s2a_compile_outcome oc;',
+             'byte-identical to first-use'),
+        ]
+        for name, old, new, expected in mutants:
+            assert text.count(old) == 1, (name, 'mutation anchor')
+            mutant = out / ('cs-fallback-mutant-' + name + '.c')
+            mutant.write_text(text.replace(old, new))
+            result = run('cs-fallback-' + name, mutant, args=('--cs-fallback-equiv',))
+            assert result.returncode == 1 and expected in result.stderr, (name, result.stdout, result.stderr)
+            print(f'{name}: expected assertion failure: {expected}', flush=True)
+        print(f'PASS: {len(mutants)} CS fallback-equiv negative controls')
+        return 0
 
     if sys.argv[1:] == ['--live-compile-mutants']:
         text = original.read_text()
@@ -392,7 +417,7 @@ def main():
         print(f'PASS: {len(changes)} negative controls')
         return 0
     if sys.argv[1:]:
-        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --gs-libpack-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants]'
+        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --gs-libpack-mutants | --cs-fallback-equiv-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants]'
                          '（其余参数是 gs_compiler_chain_test.py / tbuf_compiler_chain_test.py 的子命令）')
     # 存储图像的声明（数值类 + SPIR-V Image Format）落程序记录：生产 sampled_decl，手搭 SPIR-V
     exe = out/'image-decl'
@@ -423,6 +448,9 @@ def main():
     # 三段程序（vs + fs + gs）查出包预编库：环境变量与深度能力缓存是进程级的，单独起一个进程
     gsl = run('test-gs-libpack', original, args=('--gs-libpack',))
     sys.stdout.write(gsl.stdout); sys.stderr.write(gsl.stderr)
+    # 计算「库拒收→回退现编」与「首用现编」请求同一性（#1890）：资源根环境变量是进程级的，单独起一个进程
+    feq = run('test-cs-fallback-equiv', original, args=('--cs-fallback-equiv',))
+    sys.stdout.write(feq.stdout); sys.stderr.write(feq.stderr)
     # 结果合并开关关闭态（debug.s2a.nvk_alias=0）：开关在进程内只读一次，单独起一个进程
     off = run('test-alias-off', original, args=('--alias-off',))
     sys.stdout.write(off.stdout)
@@ -437,7 +465,7 @@ def main():
         env.update(S2A_COMPUTE_WARM='0', S2A_DIRECT_CACHE_DIR=str(cache_off))
         cs_off = run('test-compute-warm-off', original, args=('--compute-warm-off',), env=env)
         sys.stdout.write(cs_off.stdout); sys.stderr.write(cs_off.stderr)
-    return result.returncode or live_rc or gsl.returncode or off.returncode or on.returncode or cs_off.returncode
+    return result.returncode or live_rc or gsl.returncode or feq.returncode or off.returncode or on.returncode or cs_off.returncode
 
 if __name__ == '__main__':
     raise SystemExit(main())
