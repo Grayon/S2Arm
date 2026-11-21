@@ -1484,6 +1484,61 @@ static int gs_libpack_test(void) {
     printf("nvk shader pool (libpack GS): %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
+// ---- 计算出包预编库的非对齐闸（#496085）：库件只有对齐变体（libpack_vk.c 恒写 hasUnalignedStorageBuffer:false），
+//   sbuf 绑定实况非对齐时出库 = 无钳制对齐码跑非对齐缓冲（9000 DeviceLost 元凶 cs 50c91227a1082f2c 库版同型）。
+//   state_ok 对 ckey 必须生效：非对齐 → 不取库走现编加固件（请求带 hasUnalignedStorageBuffer:true），对齐 → 照常出库 ----
+static int cs_libpack_test(void) {
+    rp_shader_reset(); s2a_source_clear(); rp_state_reset(); nvn_unimpl_reset();
+    source(); fake_cs_success = 1; compiler_calls = cs_loads = 0; captured[0] = last_red[0] = 0;
+    bind_pools(100);
+    rp_S.ubo[5][0].addr = 0x1000; rp_S.ubo[5][0].size = 64;
+    rp_S.ssbo[5][0].addr = 0x10000; rp_S.ssbo[5][0].size = 256;   // 16 对齐（夹具 storage_buffer_offset_alignment=16）
+    char root[256], dir[600];
+    snprintf(root, sizeof root, "%s/nvk_cs_libpack.XXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    if (!mkdtemp(root)) { CHECK(0, "cs libpack temp root"); return 1; }
+    snprintf(dir, sizeof dir, "%s/shaders", root); mkdir(dir, 0700);
+    snprintf(dir, sizeof dir, "%s/shaders/direct", root); mkdir(dir, 0700);
+    snprintf(dir, sizeof dir, "%s/shaders/direct/b-%s-vk", root, DMSH_CHAIN); mkdir(dir, 0700);
+    // 最小计算库件：_b.json 只列 drvcb（.spv 声明 support_buffer b47 → emit 按 .spv 补出，同 libpack_vk_test 的 CS_NOSUP 夹具）。
+    //   dm_ctl 必须等于键 hex（libpack_vk.c 命中判据），按 skey[5] 现拼
+    char khex[17]; for (int b = 0; b < 8; b++) snprintf(khex + 2 * b, 3, "%02x", rp_S.skey[5][b]);
+    char csjson[512];
+    snprintf(csjson, sizeof csjson,
+        "{\"key\":\"%s_b\",\"stage\":\"cs\",\"dm_ctl\":\"%s\",\"bindings\":["
+        "{\"msl_name\":\"cp_c0\",\"kind\":\"drvcb\",\"bank\":0,\"arg_id\":0}]}", khex, khex);
+    static const uint32_t csspv[] = {
+        0x07230203u, 0x00010000u, 0u, 3u, 0u,
+        0x00060005u, 2u, 0x70707573u, 0x5f74726fu, 0x66667562u, 0x00007265u,   // OpName %2 "support_buffer"
+        0x00040047u, 2u, 33u, 47u,                                             // OpDecorate %2 Binding 47
+        0x00040047u, 2u, 34u, 0u,                                              // OpDecorate %2 DescriptorSet 0
+    };
+    uint64_t ck[2] = { lp_key(rp_S.skey[5]), lp_key(rp_S.skey[5]) };
+    uint8_t ckind[2] = { 1, 52 };
+    const uint8_t *cd[2] = { (const uint8_t *)csjson, (const uint8_t *)csspv };
+    size_t cn[2] = { strlen(csjson), sizeof csspv };
+    CHECK(lp_write(dir, ck, ckind, cd, cn, 2) == 0, "cs libpack container written");
+    setenv("S2A_SHADER_REVISION_ROOT", root, 1); unsetenv("S2A_DIRECT_CACHE_DIR");
+    const struct rp_prog *p = NULL;
+    CHECK(rp_shader_resolve_compute(&p) == 0 && p && compiler_calls == 0 && cs_loads == 1,
+          "aligned CS storage hits the library, compiler not called (calls=%d red=%s)", compiler_calls, last_red);
+    int calls = compiler_calls;
+    rp_S.ssbo[5][0].addr = 0x10001;   // 同键同绑定、只有对齐实况变：16 非对齐
+    p = NULL;
+    CHECK(rp_shader_resolve_compute(&p) == 0 && p && compiler_calls == calls + 1,
+          "unaligned CS storage refuses the library, falls back to live compile (calls=%d)", compiler_calls);
+    CHECK(strstr(captured, "\"hasUnalignedStorageBuffer\":true") != NULL,
+          "unaligned CS compile request carries the unaligned fact (hardened variant)");
+    rp_S.ssbo[5][0].addr = 0x10000;   // 回到对齐：库照常出
+    p = NULL; calls = compiler_calls;
+    CHECK(rp_shader_resolve_compute(&p) == 0 && p && compiler_calls == calls,
+          "realigned CS storage uses the library again (calls=%d)", compiler_calls);
+    unsetenv("S2A_SHADER_REVISION_ROOT");
+    char path[700];
+    snprintf(path, sizeof path, "%s/lib.idx", dir); unlink(path); snprintf(path, sizeof path, "%s/lib.000.pak", dir); unlink(path);
+    rmdir(dir); snprintf(dir, sizeof dir, "%s/shaders/direct", root); rmdir(dir); snprintf(dir, sizeof dir, "%s/shaders", root); rmdir(dir); rmdir(root);
+    printf("nvk shader pool (libpack CS unaligned gate): %d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+}
 static int diag_compile_test(void) {
     trace_on = 1; trace_begin_count = trace_end_count = 0; fake_gs_success = 0;
     gs_request_test();
@@ -1500,6 +1555,7 @@ static int diag_compile_test(void) {
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--diag-compile")) return diag_compile_test();
     if (argc == 2 && !strcmp(argv[1], "--gs-libpack")) return gs_libpack_test();
+    if (argc == 2 && !strcmp(argv[1], "--cs-libpack")) return cs_libpack_test();
     if (argc == 2 && !strcmp(argv[1], "--compute-warm")) return compute_warm_test();
     if (argc == 2 && !strcmp(argv[1], "--compute-warm-off")) return compute_warm_off_test();
     if (argc == 2 && !strcmp(argv[1], "--legacy-bytes")) {
